@@ -151,13 +151,19 @@ function Api.syncVocabulary(book_id, words)
     })
 end
 
-function Api.syncStatus(book_id, shelf, rating, review)
+function Api.syncStatus(book_id, shelf, rating, review, finished_at)
     return request("POST", "/api/plugin/sync/status", {
         bookId = book_id,
         shelf = shelf,
         rating = rating,
         review = review,
+        finishedAt = finished_at,
     })
+end
+
+-- days: { {date="YYYY-MM-DD", pagesRead=, durationSeconds=}, ... }
+function Api.syncReadingDays(days)
+    return request("POST", "/api/plugin/sync/reading-days", { days = days })
 end
 
 --- Download queue ---

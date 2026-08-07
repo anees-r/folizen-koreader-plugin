@@ -1,10 +1,12 @@
 --[[
-Maps the currently-open KOReader document to a Folizen `bookId`.
+Maps a KOReader document to a Folizen `bookId`.
 
-KOReader already computes a stable partial-MD5 hash per document (used
-internally for its own reading-statistics and history features), which
-we reuse as `deviceBookKey` — it survives file renames/moves better than
-a path, and requires no extra hashing work on our end.
+deviceBookKey is KOReader's own "partial MD5" checksum of the file —
+verified (not guessed) by reading statistics.koplugin's source, which
+uses this exact same value (cached under doc_settings key
+"partial_md5_checksum") to identify books in its own database. Reusing
+it means Folizen's book identity lines up with what statistics.koplugin
+and vocabbuilder.koplugin already key their own data by.
 
 Resolution order (requirements.md section 5.7):
   1. Cached bookId in this doc's own sidecar settings (fast path).
@@ -24,12 +26,10 @@ local Api = require("api")
 
 local BookIdentity = {}
 
-local function device_key_for(document)
-    local ok, hash = pcall(function() return document:fastDigest() end)
-    if ok and hash then return hash end
-    -- Older KOReader versions exposed this on the file directly.
-    local ok2, hash2 = pcall(util.partialMD5, document.file)
-    if ok2 and hash2 then return hash2 end
+local function device_key_for_doc_settings(doc_settings)
+    if not doc_settings then return nil end
+    local ok, key = pcall(function() return doc_settings:readSetting("partial_md5_checksum") end)
+    if ok and key then return key end
     return nil
 end
 
@@ -69,7 +69,14 @@ function BookIdentity.resolve(ui, callback)
         return
     end
 
-    local key = device_key_for(ui.document)
+    local key = device_key_for_doc_settings(doc_settings)
+    if not key and ui.document and ui.document.file then
+        -- Not cached yet (very first open before KOReader core computes
+        -- it) — compute it ourselves the same way KOReader does.
+        local ok, hash = pcall(util.partialMD5, ui.document.file)
+        if ok then key = hash end
+    end
+
     local props = ui.document:getProps() or {}
     local title = props.title and props.title ~= "" and props.title or util.splitFileNameSuffix(ui.document.file)
     local author = props.authors or props.author or _("Unknown author")
@@ -113,6 +120,26 @@ function BookIdentity.resolve(ui, callback)
         UIManager:show(InfoMessage:new{ text = _("Folizen: couldn't resolve this book — check your connection.") })
         callback(nil)
     end
+end
+
+-- Non-interactive variant for bulk/background imports (history sync),
+-- where prompting the reader once per historical book would be unusable.
+-- Tries the device key first, then falls back straight to auto-create —
+-- never shows a picker. Returns book_id_or_nil directly (synchronous from
+-- the caller's perspective, since Api.* calls already block).
+function BookIdentity.resolveByIdentity(key, title, author)
+    if key then
+        local ok, body = Api.findByDeviceKey(key)
+        if ok and body and body.results and body.results[1] then
+            return body.results[1].bookId
+        end
+    end
+
+    local link_ok, link_body = Api.linkBook({ deviceBookKey = key, title = title, author = author or _("Unknown author") })
+    if link_ok and link_body then
+        return link_body.bookId
+    end
+    return nil
 end
 
 return BookIdentity

@@ -25,6 +25,8 @@ local BookIdentity = require("book_identity")
 local Highlights = require("highlights")
 local Vocabulary = require("vocabulary")
 local Downloads = require("downloads")
+local BookHistory = require("book_history")
+local StatsHistory = require("stats_history")
 
 local Folizen = WidgetContainer:extend{
     name = "folizen",
@@ -72,6 +74,11 @@ function Folizen:getMenuItems()
             text = _("Sync this book now"),
             keep_menu_open = true,
             callback = function() self:syncCurrentBook(true) end,
+        },
+        {
+            text = _("Sync reading history…"),
+            keep_menu_open = true,
+            callback = function() self:syncReadingHistory(true) end,
         },
         {
             text = _("Download queue"),
@@ -173,6 +180,11 @@ function Folizen:doLogin(identifier, password)
             FolizenSettings.set("username", body.username)
             FolizenSettings.applyServerPrefs(body.settings)
             UIManager:show(InfoMessage:new{ text = _("Signed in as ") .. body.username })
+
+            if not FolizenSettings.get("history_synced_once") then
+                FolizenSettings.set("history_synced_once", true)
+                self:syncReadingHistory(false)
+            end
         else
             UIManager:show(InfoMessage:new{ text = _("Sign-in failed: ") .. tostring(err) })
         end
@@ -258,6 +270,14 @@ function Folizen:syncCurrentBook(announce)
 
             Api.syncProgress(book_id, current_page, total_pages, percent)
 
+            -- Rating/review/finished-status, set via KOReader's own Book
+            -- Status dialog, live off self.ui.doc_settings. This was
+            -- previously never sent at all.
+            local status = BookHistory.summaryFor(self.ui.doc_settings)
+            if status then
+                Api.syncStatus(book_id, status.shelf, status.rating, status.review, status.finishedAt)
+            end
+
             local highlight_list = Highlights.extract(self.ui.doc_settings)
             if #highlight_list > 0 then
                 Api.syncHighlights(book_id, highlight_list)
@@ -273,6 +293,84 @@ function Folizen:syncCurrentBook(announce)
                 UIManager:show(InfoMessage:new{ text = _("Synced to Folizen.") })
             end
         end)
+    end)
+end
+
+-- Chunks a list into pieces of at most `size` items.
+local function chunk(list, size)
+    local chunks = {}
+    for i = 1, #list, size do
+        local piece = {}
+        for j = i, math.min(i + size - 1, #list) do
+            table.insert(piece, list[j])
+        end
+        table.insert(chunks, piece)
+    end
+    return chunks
+end
+
+-- Pulls together everything KOReader already knows from before this
+-- device ever talked to Folizen: daily pages/duration (statistics.koplugin),
+-- per-book rating/review/finish-date (KOReader's own Book Status dialog,
+-- read from every book in KOReader's reading history), and vocabulary
+-- words looked up per book (vocabbuilder.koplugin). Runs once
+-- automatically after first login, and any time from the menu after that.
+-- Entirely best-effort: any missing companion plugin/data just means that
+-- piece is skipped, never an error shown to the reader unless `announce`.
+function Folizen:syncReadingHistory(announce)
+    if not FolizenSettings.isLoggedIn() then return end
+
+    Net.withConnection(function()
+        local info
+        if announce then
+            info = InfoMessage:new{ text = _("Syncing reading history — this can take a moment…") }
+            UIManager:show(info)
+        end
+
+        -- 1. Daily pages/duration, from statistics.koplugin, chunked so one
+        -- huge multi-year history doesn't become a single giant request.
+        local daily = StatsHistory.dailyTotals()
+        for _, piece in ipairs(chunk(daily, 200)) do
+            Api.syncReadingDays(piece)
+        end
+
+        -- 2. Per-book rating/review/finished-status, from every book in
+        -- KOReader's own reading history. Track title -> book_id as we go
+        -- so step 3 (vocabulary) can reuse the same resolution without a
+        -- second round of book-identity lookups.
+        local title_to_book_id = {}
+        local book_entries = BookHistory.collectAll()
+        for _, entry in ipairs(book_entries) do
+            local book_id = BookIdentity.resolveByIdentity(entry.deviceBookKey, entry.title, entry.author)
+            if book_id then
+                title_to_book_id[entry.title] = book_id
+                Api.syncStatus(book_id, entry.shelf, entry.rating, entry.review, entry.finishedAt)
+            end
+        end
+
+        -- 3. Vocabulary, grouped by book title. Reuses a book_id already
+        -- resolved in step 2 when the titles match; otherwise resolves it
+        -- fresh (a book with looked-up words but no status set yet).
+        local vocab_groups = Vocabulary.allWordsByTitle()
+        for _, group in ipairs(vocab_groups) do
+            if group.words and #group.words > 0 then
+                local book_id = title_to_book_id[group.title]
+                if not book_id then
+                    book_id = BookIdentity.resolveByIdentity(nil, group.title, _("Unknown author"))
+                    if book_id then title_to_book_id[group.title] = book_id end
+                end
+                if book_id then
+                    Api.syncVocabulary(book_id, group.words)
+                end
+            end
+        end
+
+        if info then UIManager:close(info) end
+        if announce then
+            UIManager:show(InfoMessage:new{
+                text = _("Reading history synced: ") .. #daily .. _(" days, ") .. #book_entries .. _(" books."),
+            })
+        end
     end)
 end
 

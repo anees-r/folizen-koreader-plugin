@@ -251,8 +251,8 @@ function Folizen:syncCurrentBook(announce)
                 return
             end
 
-            local current_page = self.ui:getCurrentPage and self.ui:getCurrentPage() or nil
-            local total_pages = self.ui.document:getPageCount and self.ui.document:getPageCount() or nil
+            local current_page = self.ui.getCurrentPage and self.ui:getCurrentPage() or nil
+            local total_pages = self.ui.document.getPageCount and self.ui.document:getPageCount() or nil
             local percent = (current_page and total_pages and total_pages > 0)
                 and (current_page / total_pages * 100) or nil
 

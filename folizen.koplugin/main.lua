@@ -17,7 +17,6 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
 local _ = require("gettext")
-
 local FolizenSettings = require("settings")
 local Api = require("api")
 local Net = require("network")
@@ -73,7 +72,30 @@ function Folizen:getMenuItems()
         {
             text = _("Sync this book now"),
             keep_menu_open = true,
+            enabled_func = function()
+                return self.ui and self.ui.doc_settings and not BookIdentity.isSyncDisabled(self.ui.doc_settings)
+            end,
             callback = function() self:syncCurrentBook(true) end,
+        },
+        {
+            text_func = function()
+                if self.ui and self.ui.doc_settings and BookIdentity.isSyncDisabled(self.ui.doc_settings) then
+                    return _("Re-enable sync for this book")
+                end
+                return _("Don't sync this book")
+            end,
+            keep_menu_open = true,
+            enabled_func = function() return self.ui and self.ui.doc_settings end,
+            callback = function()
+                if not (self.ui and self.ui.doc_settings) then return end
+                local currently_disabled = BookIdentity.isSyncDisabled(self.ui.doc_settings)
+                BookIdentity.setSyncDisabled(self.ui.doc_settings, not currently_disabled)
+                if currently_disabled then
+                    UIManager:show(InfoMessage:new{ text = _("Sync re-enabled for this book — it'll ask you to link or add it next sync.") })
+                else
+                    UIManager:show(InfoMessage:new{ text = _("This book won't sync to Folizen anymore.") })
+                end
+            end,
         },
         {
             text = _("Sync reading history…"),
@@ -183,7 +205,14 @@ function Folizen:doLogin(identifier, password)
 
             if not FolizenSettings.get("history_synced_once") then
                 FolizenSettings.set("history_synced_once", true)
-                self:syncReadingHistory(false)
+                UIManager:show(ConfirmBox:new{
+                    text = _("Import your reading history now? This pulls in past ratings, reviews, finished dates, vocabulary, and your reading calendar. It can take a minute and is safe to run later from the Folizen menu instead."),
+                    ok_text = _("Import now"),
+                    cancel_text = _("Later"),
+                    ok_callback = function()
+                        self:syncReadingHistory(true)
+                    end,
+                })
             end
         else
             UIManager:show(InfoMessage:new{ text = _("Sign-in failed: ") .. tostring(err) })
@@ -273,8 +302,8 @@ function Folizen:syncCurrentBook(announce)
             -- Rating/review/finished-status, set via KOReader's own Book
             -- Status dialog, live off self.ui.doc_settings. This was
             -- previously never sent at all.
-            local status = BookHistory.summaryFor(self.ui.doc_settings)
-            if status then
+            local status_ok, status = pcall(function() return BookHistory.summaryFor(self.ui.doc_settings) end)
+            if status_ok and status then
                 Api.syncStatus(book_id, status.shelf, status.rating, status.review, status.finishedAt)
             end
 
@@ -327,50 +356,75 @@ function Folizen:syncReadingHistory(announce)
             UIManager:show(info)
         end
 
-        -- 1. Daily pages/duration, from statistics.koplugin, chunked so one
-        -- huge multi-year history doesn't become a single giant request.
-        local daily = StatsHistory.dailyTotals()
-        for _, piece in ipairs(chunk(daily, 200)) do
-            Api.syncReadingDays(piece)
-        end
+        -- Yield to the UI thread so the "syncing" message actually paints
+        -- before the blocking network work below starts, instead of the
+        -- whole app appearing to freeze/hang the instant this runs.
+        UIManager:scheduleIn(0.1, function()
+            local daily_count, book_count = 0, 0
 
-        -- 2. Per-book rating/review/finished-status, from every book in
-        -- KOReader's own reading history. Track title -> book_id as we go
-        -- so step 3 (vocabulary) can reuse the same resolution without a
-        -- second round of book-identity lookups.
-        local title_to_book_id = {}
-        local book_entries = BookHistory.collectAll()
-        for _, entry in ipairs(book_entries) do
-            local book_id = BookIdentity.resolveByIdentity(entry.deviceBookKey, entry.title, entry.author)
-            if book_id then
-                title_to_book_id[entry.title] = book_id
-                Api.syncStatus(book_id, entry.shelf, entry.rating, entry.review, entry.finishedAt)
-            end
-        end
-
-        -- 3. Vocabulary, grouped by book title. Reuses a book_id already
-        -- resolved in step 2 when the titles match; otherwise resolves it
-        -- fresh (a book with looked-up words but no status set yet).
-        local vocab_groups = Vocabulary.allWordsByTitle()
-        for _, group in ipairs(vocab_groups) do
-            if group.words and #group.words > 0 then
-                local book_id = title_to_book_id[group.title]
-                if not book_id then
-                    book_id = BookIdentity.resolveByIdentity(nil, group.title, _("Unknown author"))
-                    if book_id then title_to_book_id[group.title] = book_id end
+            -- Every stage (and every item within it) is individually
+            -- pcall-guarded: a bad row from one book, or one companion
+            -- plugin's database being in an unexpected shape, must never
+            -- be able to abort the whole import or crash the app.
+            local overall_ok, overall_err = pcall(function()
+                -- 1. Daily pages/duration, from statistics.koplugin.
+                local stage1_ok, daily = pcall(function() return StatsHistory.dailyTotals() end)
+                if stage1_ok and daily then
+                    daily_count = #daily
+                    for _, piece in ipairs(chunk(daily, 200)) do
+                        pcall(function() Api.syncReadingDays(piece) end)
+                    end
                 end
-                if book_id then
-                    Api.syncVocabulary(book_id, group.words)
+
+                -- 2. Per-book rating/review/finished-status.
+                local title_to_book_id = {}
+                local stage2_ok, book_entries = pcall(function() return BookHistory.collectAll() end)
+                if stage2_ok and book_entries then
+                    for _, entry in ipairs(book_entries) do
+                        pcall(function()
+                            local book_id = BookIdentity.resolveByIdentity(entry.deviceBookKey, entry.title, entry.author)
+                            if book_id then
+                                title_to_book_id[entry.title] = book_id
+                                Api.syncStatus(book_id, entry.shelf, entry.rating, entry.review, entry.finishedAt)
+                                book_count = book_count + 1
+                            end
+                        end)
+                    end
+                end
+
+                -- 3. Vocabulary, grouped by book title.
+                local stage3_ok, vocab_groups = pcall(function() return Vocabulary.allWordsByTitle() end)
+                if stage3_ok and vocab_groups then
+                    for _, group in ipairs(vocab_groups) do
+                        pcall(function()
+                            if group.words and #group.words > 0 then
+                                local book_id = title_to_book_id[group.title]
+                                if not book_id then
+                                    book_id = BookIdentity.resolveByIdentity(nil, group.title, _("Unknown author"))
+                                    if book_id then title_to_book_id[group.title] = book_id end
+                                end
+                                if book_id then
+                                    Api.syncVocabulary(book_id, group.words)
+                                end
+                            end
+                        end)
+                    end
+                end
+            end)
+
+            if info then UIManager:close(info) end
+            if announce then
+                if overall_ok then
+                    UIManager:show(InfoMessage:new{
+                        text = _("Reading history synced: ") .. daily_count .. _(" days, ") .. book_count .. _(" books."),
+                    })
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = _("Reading history import hit a problem partway through, but nothing should be broken — check crash.log for details."),
+                    })
                 end
             end
-        end
-
-        if info then UIManager:close(info) end
-        if announce then
-            UIManager:show(InfoMessage:new{
-                text = _("Reading history synced: ") .. #daily .. _(" days, ") .. #book_entries .. _(" books."),
-            })
-        end
+        end)
     end)
 end
 

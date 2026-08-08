@@ -78,7 +78,7 @@ function BookHistory.collectAll()
             local fh = io.open(file, "rb")
             if fh then
                 fh:close()
-                local open_ok, docinfo = pcall(DocSettings.open, file)
+                local open_ok, docinfo = pcall(function() return DocSettings:open(file) end)
                 if open_ok and docinfo then
                     local summary = docinfo:readSetting("summary") or {}
                     local doc_props = docinfo:readSetting("doc_props") or {}

@@ -110,10 +110,12 @@ function Vocabulary.allWordsByTitle()
 
     if ok and stmt then
         local rows_ok, rows = pcall(function() return stmt:resultset() end)
-        if rows_ok and rows and rows.title then
-            for i = 1, #rows.title do
-                local title = rows.title[i]
-                local word = rows.word[i]
+        -- rows[1] = title values, rows[2] = word values — positional, not
+        -- name-keyed (see the note at the top of this file).
+        if rows_ok and rows and rows[1] then
+            for i = 1, #rows[1] do
+                local title = rows[1][i]
+                local word = rows[2] and rows[2][i]
                 if not groups[title] then
                     groups[title] = {}
                     table.insert(order, title)

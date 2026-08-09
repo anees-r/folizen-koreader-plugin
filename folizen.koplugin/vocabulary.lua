@@ -65,7 +65,7 @@ function Vocabulary.wordsForBook(book_title)
         return conn:prepare([[
             SELECT v.word FROM vocabulary v
             INNER JOIN title t ON t.id = v.title_id
-            WHERE t.name = ?
+            WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(?))
         ]])
     end)
 

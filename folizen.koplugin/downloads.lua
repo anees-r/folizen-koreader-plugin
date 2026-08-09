@@ -11,6 +11,7 @@ local _ = require("gettext")
 
 local Api = require("api")
 local Net = require("network")
+local FolizenSettings = require("settings")
 
 local Downloads = {}
 
@@ -35,7 +36,11 @@ function Downloads.show()
     Net.withConnection(function()
         local ok, body = Api.getQueue()
         if not ok then
-            UIManager:show(InfoMessage:new{ text = _("Folizen: couldn't load your download queue.") })
+            if not FolizenSettings.isLoggedIn() then
+                UIManager:show(InfoMessage:new{ text = _("Your Folizen session ended — please sign in again from the Folizen menu.") })
+            else
+                UIManager:show(InfoMessage:new{ text = _("Folizen: couldn't load your download queue.") })
+            end
             return
         end
 
@@ -56,7 +61,7 @@ function Downloads.show()
                         UIManager:show(InfoMessage:new{ text = _("No download link set for this book yet — add one on the web app.") })
                         return
                     end
-                    PathChooser:new{
+                    UIManager:show(PathChooser:new{
                         title = _("Choose a folder to save into"),
                         path = Device.home_dir or "/",
                         onConfirm = function(folder)
@@ -75,7 +80,7 @@ function Downloads.show()
                                 end
                             end)
                         end,
-                    }:chooseDir()
+                    })
                 end,
             })
         end

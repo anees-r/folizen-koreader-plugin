@@ -35,6 +35,7 @@ local Folizen = WidgetContainer:extend{
 function Folizen:init()
     self.pages_since_sync = 0
     self.current_book_id = nil
+    self.pending_words = {} -- word -> true, looked up this session, not yet synced
     self.ui.menu:registerToMainMenu(self)
 
     if FolizenSettings.isLoggedIn() then
@@ -55,7 +56,7 @@ end
 function Folizen:addToMainMenu(menu_items)
     menu_items.folizen = {
         text = _("Folizen"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table_func = function() return self:getMenuItems() end,
     }
 end
@@ -263,6 +264,24 @@ end
 
 -- ========================= Sync orchestration =========================
 
+-- KOReader fires this when the reader looks a word up in the built-in
+-- dictionary (this is the event vocabbuilder.koplugin itself listens for
+-- to build its own database — written from that reference pattern, not
+-- guessed from nothing, but still worth confirming on your KOReader
+-- version if words stop showing up here).
+--
+-- We track words in memory rather than re-reading vocabbuilder's sqlite
+-- file live: that file is only flushed to disk on KOReader's own
+-- schedule, so reading it immediately after a lookup can miss words that
+-- haven't been written yet — which is exactly why words only showed up
+-- after "Sync reading history" (which reads the file later, once it's
+-- caught up) and never from a normal in-session sync.
+function Folizen:onLookupWord(word)
+    if word and word ~= "" then
+        self.pending_words[word] = true
+    end
+end
+
 -- Called by KOReader on every page turn while a document is open.
 function Folizen:onPageUpdate(_page)
     if not FolizenSettings.isLoggedIn() then return end
@@ -347,9 +366,22 @@ function Folizen:syncCurrentBook(announce)
             end
 
             local props = self.ui.document:getProps() or {}
-            local words = Vocabulary.wordsForBook(props.title or "")
+            local db_words = Vocabulary.wordsForBook(props.title or "")
+
+            -- Merge the live in-session lookups with whatever's in
+            -- vocabbuilder's own database, deduped, so a word looked up
+            -- moments ago syncs immediately rather than waiting for a
+            -- history import or the sqlite file to catch up.
+            local word_set = {}
+            for _, w in ipairs(db_words) do word_set[w] = true end
+            for w in pairs(self.pending_words) do word_set[w] = true end
+
+            local words = {}
+            for w in pairs(word_set) do table.insert(words, w) end
+
             if #words > 0 then
                 Api.syncVocabulary(book_id, words)
+                self.pending_words = {}
             end
 
             -- If any call above hit a 401, Api.request() already cleared
@@ -416,15 +448,19 @@ function Folizen:syncReadingHistory(announce)
                 if stage1_ok and daily then
                     daily_count = #daily
                     for _pidx, piece in ipairs(chunk(daily, 200)) do
+                        if not FolizenSettings.isLoggedIn() then break end
                         pcall(function() Api.syncReadingDays(piece) end)
                     end
                 end
+
+                if not FolizenSettings.isLoggedIn() then return end
 
                 -- 2. Per-book rating/review/finished-status.
                 local title_to_book_id = {}
                 local stage2_ok, book_entries = pcall(function() return BookHistory.collectAll() end)
                 if stage2_ok and book_entries then
                     for _eidx, entry in ipairs(book_entries) do
+                        if not FolizenSettings.isLoggedIn() then break end
                         pcall(function()
                             local book_id = BookIdentity.resolveByIdentity(entry.deviceBookKey, entry.title, entry.author)
                             if book_id then
@@ -441,10 +477,13 @@ function Folizen:syncReadingHistory(announce)
                     end
                 end
 
+                if not FolizenSettings.isLoggedIn() then return end
+
                 -- 3. Vocabulary, grouped by book title.
                 local stage3_ok, vocab_groups = pcall(function() return Vocabulary.allWordsByTitle() end)
                 if stage3_ok and vocab_groups then
                     for _vidx, group in ipairs(vocab_groups) do
+                        if not FolizenSettings.isLoggedIn() then break end
                         pcall(function()
                             if group.words and #group.words > 0 then
                                 local book_id = title_to_book_id[group.title]
@@ -462,6 +501,18 @@ function Folizen:syncReadingHistory(announce)
             end)
 
             if info then UIManager:close(info) end
+
+            -- A 401 anywhere above already cleared the stored session
+            -- (Api.request() does this centrally) — that's the case that
+            -- used to show a false "synced!" message after an account was
+            -- deleted, since nothing actually *threw* a Lua error.
+            if not FolizenSettings.isLoggedIn() then
+                UIManager:show(InfoMessage:new{
+                    text = _("Your Folizen session ended partway through — please sign in again from the Folizen menu."),
+                })
+                return
+            end
+
             if announce then
                 if overall_ok then
                     UIManager:show(InfoMessage:new{

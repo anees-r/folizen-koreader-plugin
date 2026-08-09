@@ -74,7 +74,7 @@ local function show_search_and_pick(title_guess, on_pick, on_create_new, on_canc
 
                 local results_menu
                 local items = {}
-                for _, r in ipairs(results) do
+                for _ridx, r in ipairs(results) do
                     table.insert(items, {
                         text = r.title .. " — " .. r.author,
                         callback = function()

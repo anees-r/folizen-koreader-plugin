@@ -22,6 +22,7 @@ optional plugin, so these always exist once a book has been touched):
 
 local DocSettings = require("docsettings")
 local logger = require("logger")
+local Highlights = require("highlights")
 
 local BookHistory = {}
 
@@ -60,10 +61,11 @@ function BookHistory.summaryFor(doc_settings)
 end
 
 -- Walks every book KOReader has ever opened (its own history list) and
--- returns { title, author, deviceBookKey, shelf, rating, review, finishedAt }
--- for each one that has a readable sidecar file. Best-effort throughout —
--- a single unreadable/missing file just gets skipped, never aborts the
--- whole scan.
+-- returns { title, author, deviceBookKey, shelf, rating, review,
+-- finishedAt, highlights } for each one that has a readable sidecar file
+-- AND has something worth syncing (a status, or at least one highlight).
+-- Best-effort throughout — a single unreadable/missing file just gets
+-- skipped, never aborts the whole scan.
 function BookHistory.collectAll()
     local ok, ReadHistory = pcall(require, "readhistory")
     if not ok or not ReadHistory or not ReadHistory.hist then
@@ -89,8 +91,14 @@ function BookHistory.collectAll()
                     local review = (summary.note and summary.note ~= "") and summary.note or nil
                     local finishedAt = (shelf == "finished" or shelf == "dropped") and summary.modified or nil
 
-                    -- Only worth syncing if there's something to say.
-                    if shelf or rating or review then
+                    local highlight_ok, highlight_list = pcall(function() return Highlights.extract(docinfo) end)
+                    if not highlight_ok then highlight_list = {} end
+
+                    -- Worth syncing if there's a status/rating/review OR
+                    -- at least one highlight — this was the gap that meant
+                    -- "Sync reading history" imported status/vocab but
+                    -- silently skipped highlights & notes entirely.
+                    if shelf or rating or review or #highlight_list > 0 then
                         local title = doc_props.title
                         if not title or title == "" then
                             title = file:match("([^/\\]+)%.%w+$") or file
@@ -103,6 +111,7 @@ function BookHistory.collectAll()
                             rating = rating,
                             review = review,
                             finishedAt = finishedAt,
+                            highlights = highlight_list,
                         })
                     end
                 end

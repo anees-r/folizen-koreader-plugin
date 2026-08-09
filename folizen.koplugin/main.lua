@@ -36,6 +36,18 @@ function Folizen:init()
     self.pages_since_sync = 0
     self.current_book_id = nil
     self.ui.menu:registerToMainMenu(self)
+
+    if FolizenSettings.isLoggedIn() then
+        UIManager:scheduleIn(2, function()
+            local NetworkMgr = require("ui/network/manager")
+            if NetworkMgr:isConnected() then
+                local ok, body = Api.getSettings()
+                if ok and body then
+                    FolizenSettings.applyServerPrefs(body)
+                end
+            end
+        end)
+    end
 end
 
 -- ============================= Menu ================================
@@ -297,7 +309,29 @@ function Folizen:syncCurrentBook(announce)
             local percent = (current_page and total_pages and total_pages > 0)
                 and (current_page / total_pages * 100) or nil
 
-            Api.syncProgress(book_id, current_page, total_pages, percent)
+            local progress_ok, _progress_body, _progress_err, progress_status =
+                Api.syncProgress(book_id, current_page, total_pages, percent)
+
+            -- The server no longer recognizes this book for us — most
+            -- likely the cached link (saved in this book's own sidecar
+            -- file) points at an ID from before a database reset/reseed.
+            -- Clear the cache so the NEXT sync re-resolves (and, if it's
+            -- genuinely unrecognized, re-prompts) instead of failing the
+            -- same way forever.
+            if not progress_ok and progress_status == 404 then
+                if self.ui.doc_settings then
+                    self.ui.doc_settings:saveSetting("folizen_book_id", nil)
+                    self.ui.doc_settings:flush()
+                end
+                if announce then
+                    UIManager:show(InfoMessage:new{
+                        text = _("Folizen lost track of this book (likely a server reset) — linked it again, try Sync now once more."),
+                    })
+                else
+                    UIManager:show(InfoMessage:new{ text = _("Folizen: re-linking this book, it'll catch up on the next sync.") })
+                end
+                return
+            end
 
             -- Rating/review/finished-status, set via KOReader's own Book
             -- Status dialog, live off self.ui.doc_settings. This was
@@ -316,6 +350,16 @@ function Folizen:syncCurrentBook(announce)
             local words = Vocabulary.wordsForBook(props.title or "")
             if #words > 0 then
                 Api.syncVocabulary(book_id, words)
+            end
+
+            -- If any call above hit a 401, Api.request() already cleared
+            -- the stored session — surface that now rather than silently
+            -- going dark, even on a background (non-announced) sync.
+            if not FolizenSettings.isLoggedIn() then
+                UIManager:show(InfoMessage:new{
+                    text = _("Your Folizen session ended — please sign in again from the Folizen menu."),
+                })
+                return
             end
 
             if announce then
@@ -371,7 +415,7 @@ function Folizen:syncReadingHistory(announce)
                 local stage1_ok, daily = pcall(function() return StatsHistory.dailyTotals() end)
                 if stage1_ok and daily then
                     daily_count = #daily
-                    for _, piece in ipairs(chunk(daily, 200)) do
+                    for _pidx, piece in ipairs(chunk(daily, 200)) do
                         pcall(function() Api.syncReadingDays(piece) end)
                     end
                 end
@@ -380,12 +424,17 @@ function Folizen:syncReadingHistory(announce)
                 local title_to_book_id = {}
                 local stage2_ok, book_entries = pcall(function() return BookHistory.collectAll() end)
                 if stage2_ok and book_entries then
-                    for _, entry in ipairs(book_entries) do
+                    for _eidx, entry in ipairs(book_entries) do
                         pcall(function()
                             local book_id = BookIdentity.resolveByIdentity(entry.deviceBookKey, entry.title, entry.author)
                             if book_id then
                                 title_to_book_id[entry.title] = book_id
-                                Api.syncStatus(book_id, entry.shelf, entry.rating, entry.review, entry.finishedAt)
+                                if entry.shelf or entry.rating or entry.review then
+                                    Api.syncStatus(book_id, entry.shelf, entry.rating, entry.review, entry.finishedAt)
+                                end
+                                if entry.highlights and #entry.highlights > 0 then
+                                    Api.syncHighlights(book_id, entry.highlights)
+                                end
                                 book_count = book_count + 1
                             end
                         end)
@@ -395,7 +444,7 @@ function Folizen:syncReadingHistory(announce)
                 -- 3. Vocabulary, grouped by book title.
                 local stage3_ok, vocab_groups = pcall(function() return Vocabulary.allWordsByTitle() end)
                 if stage3_ok and vocab_groups then
-                    for _, group in ipairs(vocab_groups) do
+                    for _vidx, group in ipairs(vocab_groups) do
                         pcall(function()
                             if group.words and #group.words > 0 then
                                 local book_id = title_to_book_id[group.title]

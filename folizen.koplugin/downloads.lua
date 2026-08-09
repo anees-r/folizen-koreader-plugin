@@ -47,7 +47,7 @@ function Downloads.show()
 
         local menu
         local items = {}
-        for _, item in ipairs(queue) do
+        for _idx, item in ipairs(queue) do
             table.insert(items, {
                 text = item.title .. " — " .. item.author,
                 callback = function()

@@ -83,8 +83,19 @@ local function request(method, path, body, opts)
         return true, decoded, status
     end
 
+    local status_code = type(status) == "number" and status or nil
+
+    -- 401 means the token is gone server-side — either it was revoked, or
+    -- (since plugin_sessions cascade-deletes with the user) the account
+    -- itself was deleted. Either way, the device is no longer signed in;
+    -- clear local credentials immediately so the menu reflects that
+    -- instead of silently retrying a dead token forever.
+    if status_code == 401 and not opts.skip_auth then
+        FolizenSettings.clearSession()
+    end
+
     local message = (decoded and decoded.error) or ("HTTP " .. tostring(status))
-    return false, decoded, message
+    return false, decoded, message, status_code
 end
 
 --- Auth ---

@@ -16,6 +16,7 @@ local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
+local Event = require("ui/event")
 local _ = require("gettext")
 local FolizenSettings = require("settings")
 local Api = require("api")
@@ -372,6 +373,20 @@ function Folizen:syncCurrentBook(announce)
             if status_ok and status then
                 Api.syncStatus(book_id, status.shelf, status.rating, status.review, status.finishedAt)
             end
+
+            -- ReaderAnnotation (the module tracking highlights/notes
+            -- while you read) doesn't necessarily write its live state
+            -- into doc_settings the instant a highlight is made — only
+            -- on KOReader's own save schedule. Broadcasting the same
+            -- event KOReader itself uses internally to trigger a save
+            -- forces that write now, so a highlight made moments ago is
+            -- actually there when we read doc_settings next. (This is
+            -- the same root cause as the vocabulary flush-timing bug we
+            -- fixed with a live event hook — this is the equivalent fix
+            -- for highlights, via KOReader's standard save mechanism
+            -- rather than a highlight-specific event, since there isn't
+            -- a verified one to hook the way there was for vocabulary.)
+            pcall(function() self.ui:handleEvent(Event:new("SaveSettings")) end)
 
             local highlight_list = Highlights.extract(self.ui.doc_settings)
             if #highlight_list > 0 then

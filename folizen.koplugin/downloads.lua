@@ -20,16 +20,39 @@ local function guess_filename(title)
     return (safe ~= "" and safe or "book") .. ".epub"
 end
 
-local function download_to(url, dest_path, on_done)
+local function download_to(url, dest_path, on_progress, on_done)
     local client = url:match("^https") and https or http
-    socketutil:set_timeout(15, 60)
+    local file, open_err = io.open(dest_path, "wb")
+    if not file then
+        on_done(false, "couldn't open destination file: " .. tostring(open_err))
+        return
+    end
+
+    local received = 0
+    local last_reported = 0
+    local REPORT_EVERY_BYTES = 200 * 1024 -- ~200 KB, avoids flooding the UI with updates
+
+    local sink = function(chunk, err)
+        if err then return nil, err end
+        if chunk == nil then return true end -- ltn12 end-of-stream marker
+        file:write(chunk)
+        received = received + #chunk
+        if on_progress and (received - last_reported) >= REPORT_EVERY_BYTES then
+            last_reported = received
+            on_progress(received)
+        end
+        return true
+    end
+
+    socketutil:set_timeout(15, 120) -- generous block timeout; a few MB over a slow connection can take a while
     local ok, status = client.request({
         url = url,
         method = "GET",
-        sink = ltn12.sink.file(io.open(dest_path, "wb")),
+        sink = sink,
     })
     socketutil:reset_timeout()
-    on_done(ok and status and status >= 200 and status < 300, status)
+    file:close()
+    on_done(ok and status and status >= 200 and status < 300, status, received)
 end
 
 function Downloads.show()
@@ -66,13 +89,31 @@ function Downloads.show()
                         path = Device.home_dir or "/",
                         onConfirm = function(folder)
                             local dest = folder .. "/" .. guess_filename(item.title)
-                            local info = InfoMessage:new{ text = _("Downloading…") }
+                            local info = InfoMessage:new{ text = _("Downloading \"") .. item.title .. _("\"…") }
                             UIManager:show(info)
-                            download_to(item.externalLink, dest, function(success, status)
+
+                            local function update_progress(received_bytes)
+                                UIManager:close(info)
+                                local kb = math.floor(received_bytes / 1024)
+                                info = InfoMessage:new{
+                                    text = _("Downloading \"") .. item.title .. _("\"… ") .. kb .. _(" KB so far"),
+                                }
+                                UIManager:show(info)
+                                -- KOReader's HTTP call blocks the event loop, so without
+                                -- forcing a repaint here these updates may only actually
+                                -- become visible once the whole download finishes, on
+                                -- some KOReader versions/devices.
+                                pcall(function() UIManager:forceRePaint() end)
+                            end
+
+                            download_to(item.externalLink, dest, update_progress, function(success, status, received_bytes)
                                 UIManager:close(info)
                                 if success then
                                     Api.completeQueueItem(item.bookId)
-                                    UIManager:show(InfoMessage:new{ text = _("Downloaded to ") .. dest })
+                                    local kb = received_bytes and math.floor(received_bytes / 1024) or nil
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("Downloaded to ") .. dest .. (kb and (" (" .. kb .. " KB)") or ""),
+                                    })
                                 else
                                     UIManager:show(InfoMessage:new{
                                         text = _("Download failed (") .. tostring(status) .. _("). The book stays queued — try again later."),

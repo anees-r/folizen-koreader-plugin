@@ -264,19 +264,32 @@ end
 
 -- ========================= Sync orchestration =========================
 
--- KOReader fires this when the reader looks a word up in the built-in
--- dictionary (this is the event vocabbuilder.koplugin itself listens for
--- to build its own database — written from that reference pattern, not
--- guessed from nothing, but still worth confirming on your KOReader
--- version if words stop showing up here).
+-- KOReader's dictionary popup calls this on EVERY registered plugin
+-- when a lookup happens, so plugins can add their own buttons to the
+-- popup — this is verified directly from vocabbuilder.koplugin's own
+-- source (it's exactly how vocabbuilder itself captures lookups), not
+-- guessed. `dict_popup.lookupword` is the word that was looked up.
 --
--- We track words in memory rather than re-reading vocabbuilder's sqlite
--- file live: that file is only flushed to disk on KOReader's own
+-- We only read the word here and never touch `buttons` — Folizen
+-- doesn't need its own button in the popup, just a passive capture.
+--
+-- Words are tracked in memory rather than read live from vocabbuilder's
+-- sqlite file: that file is only flushed to disk on KOReader's own
 -- schedule, so reading it immediately after a lookup can miss words that
 -- haven't been written yet — which is exactly why words only showed up
 -- after "Sync reading history" (which reads the file later, once it's
 -- caught up) and never from a normal in-session sync.
-function Folizen:onLookupWord(word)
+function Folizen:onDictButtonsReady(dict_popup, _buttons)
+    if dict_popup and dict_popup.lookupword and dict_popup.lookupword ~= "" then
+        self.pending_words[dict_popup.lookupword] = true
+    end
+end
+
+-- vocabbuilder.koplugin (if installed) also relays a "WordLookedUp"
+-- event of its own — harmless and cheap to also listen for as a second
+-- net, in case it catches a case (e.g. wiki lookups) the hook above
+-- doesn't.
+function Folizen:onWordLookedUp(word)
     if word and word ~= "" then
         self.pending_words[word] = true
     end

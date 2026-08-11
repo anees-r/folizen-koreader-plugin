@@ -78,20 +78,25 @@ function Folizen:getMenuItems()
         }
     end
 
-    return {
+    local has_open_book = self.ui and self.ui.doc_settings and true or false
+
+    local items = {
         {
             text = _("Signed in as ") .. (FolizenSettings.get("username") or ""),
             enabled = false,
         },
-        {
+    }
+
+    if has_open_book then
+        table.insert(items, {
             text = _("Sync this book now"),
             keep_menu_open = true,
             enabled_func = function()
                 return self.ui and self.ui.doc_settings and not BookIdentity.isSyncDisabled(self.ui.doc_settings)
             end,
             callback = function() self:syncCurrentBook(true) end,
-        },
-        {
+        })
+        table.insert(items, {
             text_func = function()
                 if self.ui and self.ui.doc_settings and BookIdentity.isSyncDisabled(self.ui.doc_settings) then
                     return _("Re-enable sync for this book")
@@ -99,7 +104,6 @@ function Folizen:getMenuItems()
                 return _("Don't sync this book")
             end,
             keep_menu_open = true,
-            enabled_func = function() return self.ui and self.ui.doc_settings end,
             callback = function()
                 if not (self.ui and self.ui.doc_settings) then return end
                 local currently_disabled = BookIdentity.isSyncDisabled(self.ui.doc_settings)
@@ -110,46 +114,49 @@ function Folizen:getMenuItems()
                     UIManager:show(InfoMessage:new{ text = _("This book won't sync to Folizen anymore.") })
                 end
             end,
-        },
-        {
-            text = _("Sync reading history…"),
-            keep_menu_open = true,
-            callback = function() self:syncReadingHistory(true) end,
-        },
-        {
-            text = _("Download queue"),
-            keep_menu_open = true,
-            callback = function() Downloads.show() end,
-        },
-        {
-            text = _("Auto-sync"),
-            checked_func = function() return FolizenSettings.get("auto_sync_enabled") end,
-            callback = function()
-                local new_val = not FolizenSettings.get("auto_sync_enabled")
-                FolizenSettings.set("auto_sync_enabled", new_val)
-                Api.patchSettings({ autoSyncEnabled = new_val })
-            end,
-        },
-        {
-            text = _("Sync every N pages…"),
-            keep_menu_open = true,
-            callback = function() self:showThresholdDialog() end,
-        },
-        {
-            text = _("Allow Folizen to turn on Wi-Fi automatically"),
-            checked_func = function() return FolizenSettings.get("wifi_auto_enable") end,
-            callback = function()
-                local new_val = not FolizenSettings.get("wifi_auto_enable")
-                FolizenSettings.set("wifi_auto_enable", new_val)
-                Api.patchSettings({ wifiAutoEnable = new_val })
-            end,
-        },
-        {
-            text = _("Sign out"),
-            keep_menu_open = true,
-            callback = function() self:logout() end,
-        },
-    }
+        })
+    end
+
+    table.insert(items, {
+        text = _("Sync reading history…"),
+        keep_menu_open = true,
+        callback = function() self:syncReadingHistory(true) end,
+    })
+    table.insert(items, {
+        text = _("Download queue"),
+        keep_menu_open = true,
+        callback = function() Downloads.show() end,
+    })
+    table.insert(items, {
+        text = _("Auto-sync"),
+        checked_func = function() return FolizenSettings.get("auto_sync_enabled") end,
+        callback = function()
+            local new_val = not FolizenSettings.get("auto_sync_enabled")
+            FolizenSettings.set("auto_sync_enabled", new_val)
+            Api.patchSettings({ autoSyncEnabled = new_val })
+        end,
+    })
+    table.insert(items, {
+        text = _("Sync every N pages…"),
+        keep_menu_open = true,
+        callback = function() self:showThresholdDialog() end,
+    })
+    table.insert(items, {
+        text = _("Allow Folizen to turn on Wi-Fi automatically"),
+        checked_func = function() return FolizenSettings.get("wifi_auto_enable") end,
+        callback = function()
+            local new_val = not FolizenSettings.get("wifi_auto_enable")
+            FolizenSettings.set("wifi_auto_enable", new_val)
+            Api.patchSettings({ wifiAutoEnable = new_val })
+        end,
+    })
+    table.insert(items, {
+        text = _("Sign out"),
+        keep_menu_open = true,
+        callback = function() self:logout() end,
+    })
+
+    return items
 end
 
 -- ============================= Auth ================================

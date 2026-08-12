@@ -15,7 +15,7 @@ local settings_file = DataStorage:getSettingsDir() .. "/folizen.lua"
 local store = LuaSettings:open(settings_file)
 
 local DEFAULTS = {
-    server_url = "https://your-folizen-deployment.vercel.app",
+    server_url = "https://folizen.vercel.app",
     refresh_token = nil,
     username = nil,
     auto_sync_enabled = true,

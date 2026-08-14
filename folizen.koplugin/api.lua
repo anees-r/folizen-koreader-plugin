@@ -148,6 +148,27 @@ function Api.syncProgress(book_id, page, total_pages, percent)
     })
 end
 
+-- Batched per-sync-event push (section 7.1): progress, device-set status,
+-- highlights, and vocabulary in a single HTTPS request, instead of one
+-- request per data type. payload: { book_id=, page=, total_pages=, percent=,
+-- shelf=, rating=, review=, finished_at=, highlights=, words= } — any of the
+-- status/highlights/words fields may be nil/empty and are skipped
+-- server-side.
+function Api.sync(payload)
+    return request("POST", "/api/plugin/sync", {
+        bookId = payload.book_id,
+        page = payload.page,
+        totalPages = payload.total_pages,
+        percent = payload.percent,
+        shelf = payload.shelf,
+        rating = payload.rating,
+        review = payload.review,
+        finishedAt = payload.finished_at,
+        highlights = payload.highlights,
+        words = payload.words,
+    })
+end
+
 function Api.syncHighlights(book_id, highlights_list)
     return request("POST", "/api/plugin/sync/highlights", {
         bookId = book_id,

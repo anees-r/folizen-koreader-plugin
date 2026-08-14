@@ -37,6 +37,8 @@ function Folizen:init()
     self.pages_since_sync = 0
     self.current_book_id = nil
     self.pending_words = {} -- word -> true, looked up this session, not yet synced
+    self.sync_in_flight = false -- debounce: a sync is actively running right now
+    self.resync_requested = false -- another trigger fired while sync_in_flight — run once more after
     self.ui.menu:registerToMainMenu(self)
 
     if FolizenSettings.isLoggedIn() then
@@ -94,7 +96,7 @@ function Folizen:getMenuItems()
             enabled_func = function()
                 return self.ui and self.ui.doc_settings and not BookIdentity.isSyncDisabled(self.ui.doc_settings)
             end,
-            callback = function() self:syncCurrentBook(true) end,
+            callback = function() self:syncCurrentBook(true, true) end,
         })
         table.insert(items, {
             text_func = function()
@@ -238,15 +240,26 @@ function Folizen:doLogin(identifier, password)
         else
             UIManager:show(InfoMessage:new{ text = _("Sign-in failed: ") .. tostring(err) })
         end
-    end)
+    end, { manual = true })
 end
 
+-- Clears the device-side session and everything Folizen itself cached
+-- locally: the refresh token, cached sync preferences (they'll be
+-- re-fetched fresh on next login), and the per-book link/opt-out flags
+-- stamped into every book's own sidecar. Deliberately never touches
+-- anything KOReader itself owns — highlights/annotations, vocabulary,
+-- Book Status (rating/review/finished state), or reading progress all stay
+-- exactly as KOReader has them; only Folizen's own bookkeeping is cleared.
 function Folizen:logout()
     Net.withConnection(function()
         Api.logout() -- best-effort; revoke locally regardless of network result
         FolizenSettings.clearSession()
+        if self.ui and self.ui.doc_settings then
+            BookIdentity.setSyncDisabled(self.ui.doc_settings, false) -- also clears folizen_book_id
+        end
+        BookIdentity.clearAllLocalLinks()
         UIManager:show(InfoMessage:new{ text = _("Signed out of Folizen.") })
-    end)
+    end, { manual = true })
 end
 
 function Folizen:showThresholdDialog()
@@ -313,135 +326,206 @@ function Folizen:onPageUpdate(_page)
 
     if self.pages_since_sync >= threshold then
         self.pages_since_sync = 0
-        self:syncCurrentBook(false)
+        self:syncCurrentBook(false, false)
     end
 end
 
 function Folizen:onEndOfBook()
-    if FolizenSettings.isLoggedIn() then
-        self:syncCurrentBook(true)
+    if FolizenSettings.isLoggedIn() and FolizenSettings.get("auto_sync_enabled") then
+        self:syncCurrentBook(true, false)
     end
 end
 
 function Folizen:onCloseDocument()
     if FolizenSettings.isLoggedIn() and FolizenSettings.get("auto_sync_enabled") then
-        self:syncCurrentBook(false)
+        self:syncCurrentBook(false, false)
     end
 end
 
--- The core sync routine: resolves book identity, then pushes progress,
--- highlights, and vocabulary. `announce` shows a toast either way when
--- true (used for the manual "Sync this book now" menu action).
-function Folizen:syncCurrentBook(announce)
+-- KOReader broadcasts a NetworkConnected event when Wi-Fi comes online
+-- (same reference-knowledge basis as the other event hooks in this file —
+-- see the top-of-file note). The only thing we use it for is retrying a
+-- sync that was queued because Wi-Fi was off during an automatic trigger
+-- (section 5.3) — this is purely event-driven, not a polling loop
+-- (section 7.1 forbids a background service).
+function Folizen:onNetworkConnected()
+    if not FolizenSettings.isLoggedIn() then return end
+    if not FolizenSettings.get("sync_pending") then return end
+    if not (self.ui and self.ui.document) then return end
+    self:syncCurrentBook(false, false)
+end
+
+-- Entry point for every sync trigger. `announce` shows a toast either way
+-- when true; `is_manual` is true only for the "Sync this book now" menu
+-- action — it's what decides whether a Wi-Fi-off situation interrupts the
+-- reader with a prompt (manual) or is queued silently for later (automatic,
+-- see Net.withConnection/onNetworkConnected above).
+--
+-- Debounced: if a sync is already running when another trigger fires (e.g.
+-- onEndOfBook immediately followed by onCloseDocument), the new trigger
+-- doesn't start a second overlapping request — it just marks that one more
+-- sync should run right after the current one finishes, so the latest
+-- state still gets sent exactly once more, not dropped and not duplicated.
+function Folizen:syncCurrentBook(announce, is_manual)
     if not self.ui or not self.ui.document then return end
 
-    Net.withConnection(function()
-        BookIdentity.resolve(self.ui, function(book_id)
-            if not book_id then
-                if announce then
-                    UIManager:show(InfoMessage:new{ text = _("Folizen: couldn't identify this book.") })
-                end
-                return
-            end
+    if self.sync_in_flight then
+        self.resync_requested = true
+        return
+    end
+    self.sync_in_flight = true
 
-            local current_page = self.ui.getCurrentPage and self.ui:getCurrentPage() or nil
-            local total_pages = self.ui.document.getPageCount and self.ui.document:getPageCount() or nil
-            local percent = (current_page and total_pages and total_pages > 0)
-                and (current_page / total_pages * 100) or nil
+    -- Failsafe: book-identity resolution can wait on a reader-facing dialog
+    -- (a brand-new, unlinked book) that could in principle be dismissed
+    -- without picking anything, which would otherwise leave sync_in_flight
+    -- stuck forever. This unsticks it well past any real network timeout
+    -- (api.lua's own timeouts top out around 20-35s).
+    UIManager:scheduleIn(60, function()
+        self.sync_in_flight = false
+    end)
 
-            local progress_ok, progress_body, _progress_err, progress_status =
-                Api.syncProgress(book_id, current_page, total_pages, percent)
+    local attempted = Net.withConnection(function()
+        FolizenSettings.set("sync_pending", false)
+        self:performSync(announce)
+    end, {
+        manual = is_manual,
+        on_declined = function()
+            self.sync_in_flight = false
+        end,
+    })
 
-            -- The server no longer recognizes this book for us — most
-            -- likely the cached link (saved in this book's own sidecar
-            -- file) points at an ID from before a database reset/reseed.
-            -- Clear the cache so the NEXT sync re-resolves (and, if it's
-            -- genuinely unrecognized, re-prompts) instead of failing the
-            -- same way forever.
-            if not progress_ok and progress_status == 404 then
-                if self.ui.doc_settings then
-                    self.ui.doc_settings:saveSetting("folizen_book_id", nil)
-                    self.ui.doc_settings:flush()
-                end
-                if announce then
-                    UIManager:show(InfoMessage:new{
-                        text = _("Folizen lost track of this book (likely a server reset) — linked it again, try Sync now once more."),
-                    })
-                else
-                    UIManager:show(InfoMessage:new{ text = _("Folizen: re-linking this book, it'll catch up on the next sync.") })
-                end
-                return
-            end
+    if not attempted then
+        -- Automatic trigger, Wi-Fi off, not auto-enabling: queue it rather
+        -- than interrupting the reader — onNetworkConnected retries once
+        -- connectivity returns.
+        self.sync_in_flight = false
+        FolizenSettings.set("sync_pending", true)
+    end
+end
 
-            -- The web app started a reread on this book while KOReader's
-            -- own Book Status dialog still said "complete" from the
-            -- previous read-through — clear that local flag now, before
-            -- reading it below, so this sync (and every one after) stops
-            -- reporting a stale "finished" status.
-            if progress_ok and progress_body and progress_body.resetDeviceStatus then
-                pcall(function() BookHistory.clearFinishedStatus(self.ui.doc_settings) end)
-            end
+-- If another trigger came in while this sync was running, run exactly one
+-- more sync now that it's free, so the latest info gets sent.
+function Folizen:maybeResync()
+    self.sync_in_flight = false
+    if self.resync_requested then
+        self.resync_requested = false
+        self:syncCurrentBook(false, false)
+    end
+end
 
-            -- Rating/review/finished-status, set via KOReader's own Book
-            -- Status dialog, live off self.ui.doc_settings. This was
-            -- previously never sent at all.
-            local status_ok, status = pcall(function() return BookHistory.summaryFor(self.ui.doc_settings) end)
-            if status_ok and status then
-                Api.syncStatus(book_id, status.shelf, status.rating, status.review, status.finishedAt)
-            end
-
-            -- ReaderAnnotation (the module tracking highlights/notes
-            -- while you read) doesn't necessarily write its live state
-            -- into doc_settings the instant a highlight is made — only
-            -- on KOReader's own save schedule. Broadcasting the same
-            -- event KOReader itself uses internally to trigger a save
-            -- forces that write now, so a highlight made moments ago is
-            -- actually there when we read doc_settings next. (This is
-            -- the same root cause as the vocabulary flush-timing bug we
-            -- fixed with a live event hook — this is the equivalent fix
-            -- for highlights, via KOReader's standard save mechanism
-            -- rather than a highlight-specific event, since there isn't
-            -- a verified one to hook the way there was for vocabulary.)
-            pcall(function() self.ui:handleEvent(Event:new("SaveSettings")) end)
-
-            local highlight_list = Highlights.extract(self.ui.doc_settings)
-            if #highlight_list > 0 then
-                Api.syncHighlights(book_id, highlight_list)
-            end
-
-            local props = self.ui.document:getProps() or {}
-            local db_words = Vocabulary.wordsForBook(props.title or "")
-
-            -- Merge the live in-session lookups with whatever's in
-            -- vocabbuilder's own database, deduped, so a word looked up
-            -- moments ago syncs immediately rather than waiting for a
-            -- history import or the sqlite file to catch up.
-            local word_set = {}
-            for _, w in ipairs(db_words) do word_set[w] = true end
-            for w in pairs(self.pending_words) do word_set[w] = true end
-
-            local words = {}
-            for w in pairs(word_set) do table.insert(words, w) end
-
-            if #words > 0 then
-                Api.syncVocabulary(book_id, words)
-                self.pending_words = {}
-            end
-
-            -- If any call above hit a 401, Api.request() already cleared
-            -- the stored session — surface that now rather than silently
-            -- going dark, even on a background (non-announced) sync.
-            if not FolizenSettings.isLoggedIn() then
-                UIManager:show(InfoMessage:new{
-                    text = _("Your Folizen session ended — please sign in again from the Folizen menu."),
-                })
-                return
-            end
-
+-- The actual sync work, run once connectivity is confirmed: resolves book
+-- identity, then pushes progress, status, highlights, and vocabulary in a
+-- single combined request (section 7.1).
+function Folizen:performSync(announce)
+    BookIdentity.resolve(self.ui, function(book_id)
+        if not book_id then
             if announce then
-                UIManager:show(InfoMessage:new{ text = _("Synced to Folizen.") })
+                UIManager:show(InfoMessage:new{ text = _("Folizen: couldn't identify this book.") })
             end
-        end)
+            self:maybeResync()
+            return
+        end
+
+        local current_page = self.ui.getCurrentPage and self.ui:getCurrentPage() or nil
+        local total_pages = self.ui.document.getPageCount and self.ui.document:getPageCount() or nil
+        local percent = (current_page and total_pages and total_pages > 0)
+            and (current_page / total_pages * 100) or nil
+
+        -- Rating/review/finished-status, set via KOReader's own Book
+        -- Status dialog, live off self.ui.doc_settings.
+        local status_ok, status = pcall(function() return BookHistory.summaryFor(self.ui.doc_settings) end)
+        if not status_ok then status = nil end
+
+        -- ReaderAnnotation (the module tracking highlights/notes while you
+        -- read) doesn't necessarily write its live state into doc_settings
+        -- the instant a highlight is made — only on KOReader's own save
+        -- schedule. Broadcasting the same event KOReader itself uses
+        -- internally to trigger a save forces that write now, so a
+        -- highlight made moments ago is actually there when we read
+        -- doc_settings next.
+        pcall(function() self.ui:handleEvent(Event:new("SaveSettings")) end)
+
+        local highlight_list = Highlights.extract(self.ui.doc_settings)
+
+        local props = self.ui.document:getProps() or {}
+        local db_words = Vocabulary.wordsForBook(props.title or "")
+
+        -- Merge the live in-session lookups with whatever's in
+        -- vocabbuilder's own database, deduped, so a word looked up
+        -- moments ago syncs immediately rather than waiting for a history
+        -- import or the sqlite file to catch up.
+        local word_set = {}
+        for _, w in ipairs(db_words) do word_set[w] = true end
+        for w in pairs(self.pending_words) do word_set[w] = true end
+        local words = {}
+        for w in pairs(word_set) do table.insert(words, w) end
+
+        local sync_ok, sync_body, _sync_err, sync_status = Api.sync{
+            book_id = book_id,
+            page = current_page,
+            total_pages = total_pages,
+            percent = percent,
+            shelf = status and status.shelf or nil,
+            rating = status and status.rating or nil,
+            review = status and status.review or nil,
+            finished_at = status and status.finishedAt or nil,
+            highlights = highlight_list,
+            words = words,
+        }
+
+        -- The server no longer recognizes this book for us — most likely
+        -- the cached link (saved in this book's own sidecar file) points
+        -- at an ID from before a database reset/reseed. Clear the cache so
+        -- the NEXT sync re-resolves (and, if it's genuinely unrecognized,
+        -- re-prompts) instead of failing the same way forever.
+        if not sync_ok and sync_status == 404 then
+            if self.ui.doc_settings then
+                self.ui.doc_settings:saveSetting("folizen_book_id", nil)
+                self.ui.doc_settings:flush()
+            end
+            if announce then
+                UIManager:show(InfoMessage:new{
+                    text = _("Folizen lost track of this book (likely a server reset) — linked it again, try Sync now once more."),
+                })
+            else
+                UIManager:show(InfoMessage:new{ text = _("Folizen: re-linking this book, it'll catch up on the next sync.") })
+            end
+            self:maybeResync()
+            return
+        end
+
+        -- The web app started a reread on this book while KOReader's own
+        -- Book Status dialog still said "complete" from the previous
+        -- read-through — clear that local flag now, so the next sync
+        -- stops reporting a stale "finished" status.
+        if sync_ok and sync_body and sync_body.resetDeviceStatus then
+            pcall(function() BookHistory.clearFinishedStatus(self.ui.doc_settings) end)
+        end
+
+        if sync_ok then
+            self.pending_words = {}
+        end
+
+        -- If the request above hit a 401, Api.request() already cleared
+        -- the stored session — surface that now rather than silently going
+        -- dark, even on a background (non-announced) sync.
+        if not FolizenSettings.isLoggedIn() then
+            UIManager:show(InfoMessage:new{
+                text = _("Your Folizen session ended — please sign in again from the Folizen menu."),
+            })
+            self:maybeResync()
+            return
+        end
+
+        if announce then
+            if sync_ok then
+                UIManager:show(InfoMessage:new{ text = _("Synced to Folizen.") })
+            else
+                UIManager:show(InfoMessage:new{ text = _("Folizen sync failed — it'll retry on the next sync.") })
+            end
+        end
+
+        self:maybeResync()
     end)
 end
 
@@ -569,7 +653,7 @@ function Folizen:syncReadingHistory(announce)
                 end
             end
         end)
-    end)
+    end, { manual = true })
 end
 
 return Folizen

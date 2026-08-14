@@ -41,9 +41,19 @@ function FolizenSettings.isLoggedIn()
     return FolizenSettings.get("refresh_token") ~= nil
 end
 
+-- Clears the token plus every locally cached sync preference (they revert
+-- to DEFAULTS via FolizenSettings.get until a fresh login re-fetches the
+-- server's actual values) — section 5.2's "clears the stored token and any
+-- locally cached sync state". Per-book links live in each book's own
+-- sidecar, not here — see BookIdentity.clearAllLocalLinks.
 function FolizenSettings.clearSession()
     store:saveSetting("refresh_token", nil)
     store:saveSetting("username", nil)
+    store:saveSetting("auto_sync_enabled", nil)
+    store:saveSetting("sync_threshold_pages", nil)
+    store:saveSetting("wifi_auto_enable", nil)
+    store:saveSetting("history_synced_once", nil)
+    store:saveSetting("sync_pending", nil)
     store:flush()
 end
 

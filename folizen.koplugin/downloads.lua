@@ -20,11 +20,32 @@ local function guess_filename(title)
     return (safe ~= "" and safe or "book") .. ".epub"
 end
 
+-- LuaSocket reports a failed connection as (nil, error_string) rather than
+-- a numeric status — turns the common cases into a message that actually
+-- tells the reader what to do, instead of a raw socket error string.
+local function describe_network_error(err)
+    local s = tostring(err or ""):lower()
+    if s:find("timeout") then
+        return _("Connection timed out — check your Wi-Fi and try again.")
+    end
+    if s:find("refused") or s:find("no route") or s:find("could not resolve") or s:find("host") then
+        return _("Couldn't reach the download host — check your connection and the link.")
+    end
+    return _("Network error: ") .. tostring(err)
+end
+
+-- Distinguishes every failure mode section 5.6 calls out by name: network/
+-- timeout, an HTML page in place of the file (host interstitials — e.g.
+-- Google Drive's "can't scan this file for viruses" page, which returns
+-- HTTP 200 with an HTML body, not a file), permissions/access errors,
+-- not-found, and local disk-write failure. Returns (success, message,
+-- received_bytes) — on any failure, a partially-written file is removed
+-- rather than left behind masquerading as the real book.
 local function download_to(url, dest_path, on_progress, on_done)
     local client = url:match("^https") and https or http
     local file, open_err = io.open(dest_path, "wb")
     if not file then
-        on_done(false, "couldn't open destination file: " .. tostring(open_err))
+        on_done(false, _("Couldn't write to that folder: ") .. tostring(open_err))
         return
     end
 
@@ -45,14 +66,39 @@ local function download_to(url, dest_path, on_progress, on_done)
     end
 
     socketutil:set_timeout(15, 120) -- generous block timeout; a few MB over a slow connection can take a while
-    local ok, status = client.request({
+    local ok, code, headers = client.request({
         url = url,
         method = "GET",
         sink = sink,
     })
     socketutil:reset_timeout()
     file:close()
-    on_done(ok and status and status >= 200 and status < 300, status, received)
+
+    if not ok then
+        os.remove(dest_path)
+        on_done(false, describe_network_error(code))
+        return
+    end
+
+    if type(code) == "number" and code >= 200 and code < 300 then
+        local content_type = (headers and (headers["content-type"] or headers["Content-Type"])) or ""
+        if content_type:lower():find("text/html", 1, true) then
+            os.remove(dest_path)
+            on_done(false, _("The link returned a webpage instead of the book file — the host likely needs manual confirmation first (common with large-file warnings). Try opening the link in a browser to download it, or update the link on the web app."))
+            return
+        end
+        on_done(true, nil, received)
+        return
+    end
+
+    os.remove(dest_path)
+    if code == 401 or code == 403 then
+        on_done(false, _("The host denied access (") .. tostring(code) .. _(") — the link may require sign-in or have expired."))
+    elseif code == 404 then
+        on_done(false, _("File not found at that link (404) — double-check the link on the web app."))
+    else
+        on_done(false, _("The host returned an error (") .. tostring(code) .. ").")
+    end
 end
 
 function Downloads.show()
@@ -106,7 +152,7 @@ function Downloads.show()
                                 pcall(function() UIManager:forceRePaint() end)
                             end
 
-                            download_to(item.externalLink, dest, update_progress, function(success, status, received_bytes)
+                            download_to(item.externalLink, dest, update_progress, function(success, message, received_bytes)
                                 UIManager:close(info)
                                 if success then
                                     Api.completeQueueItem(item.bookId)
@@ -116,7 +162,7 @@ function Downloads.show()
                                     })
                                 else
                                     UIManager:show(InfoMessage:new{
-                                        text = _("Download failed (") .. tostring(status) .. _("). The book stays queued — try again later."),
+                                        text = message .. _(" The book stays queued — try again later."),
                                     })
                                 end
                             end)
@@ -132,7 +178,7 @@ function Downloads.show()
             width = Device.screen:getWidth() * 0.8,
         }
         UIManager:show(menu)
-    end)
+    end, { manual = true })
 end
 
 return Downloads

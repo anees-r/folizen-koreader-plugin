@@ -195,6 +195,34 @@ function BookIdentity.resolve(ui, callback)
     )
 end
 
+-- Called on logout (section 5.2: logout clears "any locally cached sync
+-- state"). Sweeps every book KOReader has ever opened and clears Folizen's
+-- own per-book bookkeeping (the link to a server book_id, and the
+-- don't-sync flag) so a different account signing in on this device
+-- doesn't inherit stale links to books it can't see. Never touches
+-- anything else in the sidecar — summary (status/rating/review),
+-- annotations (highlights/notes), or KOReader's own progress fields are
+-- untouched, since those belong to KOReader, not Folizen.
+function BookIdentity.clearAllLocalLinks()
+    local ok, ReadHistory = pcall(require, "readhistory")
+    if not ok or not ReadHistory or not ReadHistory.hist then return end
+    local DocSettings = require("docsettings")
+
+    for _, entry in ipairs(ReadHistory.hist) do
+        local file = entry.file
+        if file then
+            local fh = io.open(file, "rb")
+            if fh then
+                fh:close()
+                local open_ok, docinfo = pcall(function() return DocSettings:open(file) end)
+                if open_ok and docinfo then
+                    pcall(function() BookIdentity.setSyncDisabled(docinfo, false) end)
+                end
+            end
+        end
+    end
+end
+
 -- Non-interactive variant for bulk/background imports (history sync),
 -- where prompting the reader once per historical book would be unusable.
 -- Tries the device key first, then falls back straight to auto-create —

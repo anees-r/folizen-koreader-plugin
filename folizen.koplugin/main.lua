@@ -349,7 +349,7 @@ function Folizen:syncCurrentBook(announce)
             local percent = (current_page and total_pages and total_pages > 0)
                 and (current_page / total_pages * 100) or nil
 
-            local progress_ok, _progress_body, _progress_err, progress_status =
+            local progress_ok, progress_body, _progress_err, progress_status =
                 Api.syncProgress(book_id, current_page, total_pages, percent)
 
             -- The server no longer recognizes this book for us — most
@@ -371,6 +371,15 @@ function Folizen:syncCurrentBook(announce)
                     UIManager:show(InfoMessage:new{ text = _("Folizen: re-linking this book, it'll catch up on the next sync.") })
                 end
                 return
+            end
+
+            -- The web app started a reread on this book while KOReader's
+            -- own Book Status dialog still said "complete" from the
+            -- previous read-through — clear that local flag now, before
+            -- reading it below, so this sync (and every one after) stops
+            -- reporting a stale "finished" status.
+            if progress_ok and progress_body and progress_body.resetDeviceStatus then
+                pcall(function() BookHistory.clearFinishedStatus(self.ui.doc_settings) end)
             end
 
             -- Rating/review/finished-status, set via KOReader's own Book

@@ -44,6 +44,26 @@ local function status_to_shelf(status)
     return nil -- "reading"/"" — leave shelf alone, progress sync already handles this
 end
 
+-- Called when the server tells us (via resetDeviceStatus on a progress sync
+-- response) that a reread was started from the web app on a book KOReader's
+-- own Book Status dialog still has marked "complete" from the previous
+-- read-through. That local flag is never touched by anything else on the
+-- device, so left alone it keeps reporting "finished" on every sync,
+-- forever. Clears just the status field to "reading" — rating/note from the
+-- prior read-through are left intact, only the finished flag changes.
+function BookHistory.clearFinishedStatus(doc_settings)
+    if not doc_settings then return end
+    local ok, summary = pcall(function() return doc_settings:readSetting("summary") end)
+    if not ok or not summary then return end
+    if summary.status ~= "complete" and summary.status ~= "abandoned" then return end
+
+    summary.status = "reading"
+    pcall(function()
+        doc_settings:saveSetting("summary", summary)
+        doc_settings:flush()
+    end)
+end
+
 -- Reads the summary for a single already-open document (ui.doc_settings).
 -- Returns nil if nothing's been set, or { shelf, rating, review, finishedAt }.
 function BookHistory.summaryFor(doc_settings)

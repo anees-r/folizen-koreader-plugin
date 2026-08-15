@@ -193,7 +193,8 @@ function Api.syncStatus(book_id, shelf, rating, review, finished_at)
     })
 end
 
--- days: { {date="YYYY-MM-DD", pagesRead=, durationSeconds=}, ... }
+-- days: { {date="YYYY-MM-DD", pagesRead=, durationSeconds=,
+--          books={ {title=, durationSeconds=, pagesRead=}, ... }}, ... }
 function Api.syncReadingDays(days)
     return request("POST", "/api/plugin/sync/reading-days", { days = days })
 end

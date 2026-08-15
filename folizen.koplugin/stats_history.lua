@@ -6,8 +6,11 @@ statistics.koplugin (if installed/enabled) keeps a sqlite3 database at
 Schema verified directly from statistics.koplugin/main.lua, not guessed.
 
 We aggregate this into one row per calendar day (total pages "turned",
-total seconds spent, and which book titles were read that day) rather
-than shipping the raw per-page log.
+total seconds spent) for the streak calendar, PLUS a per-book breakdown
+of that same day (each book's own title/duration/pages) so Folizen can
+attribute reading time to the right book instead of crediting every book
+read that day with the day's full total. The per-book breakdown comes
+straight out of the SQL GROUP BY below — nothing is collapsed away.
 
 The `+ 10800` (3 hours) offset when bucketing by day matches exactly what
 statistics.koplugin's own calendar view does (calendarview.lua) when
@@ -46,8 +49,11 @@ local function open_db()
     return conn
 end
 
--- Returns { {date="YYYY-MM-DD", pagesRead=N, durationSeconds=N, bookTitles={...}}, ... }
--- covering every day KOReader has ever logged reading activity for.
+-- Returns { {date="YYYY-MM-DD", pagesRead=N, durationSeconds=N,
+--            books={ {title=, durationSeconds=, pagesRead=}, ... }}, ... }
+-- covering every day KOReader has ever logged reading activity for. Each
+-- `books` entry is that one book's own share of the day — they sum to the
+-- day-level pagesRead/durationSeconds, they don't duplicate it.
 function StatsHistory.dailyTotals()
     local conn = open_db()
     if not conn then return {} end
@@ -71,7 +77,8 @@ function StatsHistory.dailyTotals()
     if ok and stmt then
         local rows_ok, rows = pcall(function() return stmt:resultset() end)
         -- rows[1] = day values, rows[2] = title values, rows[3] = duration,
-        -- rows[4] = pages_read — one entry per (day, book) group.
+        -- rows[4] = pages_read — one entry per (day, book) group, already
+        -- the per-book breakdown we want (no further collapsing needed).
         if rows_ok and rows and rows[1] then
             for i = 1, #rows[1] do
                 local day = rows[1][i]
@@ -81,15 +88,14 @@ function StatsHistory.dailyTotals()
 
                 if day then
                     if not by_day[day] then
-                        by_day[day] = { date = day, pagesRead = 0, durationSeconds = 0, bookTitles = {}, seen = {} }
+                        by_day[day] = { date = day, pagesRead = 0, durationSeconds = 0, books = {} }
                         table.insert(order, day)
                     end
                     local entry = by_day[day]
                     entry.pagesRead = entry.pagesRead + pages
                     entry.durationSeconds = entry.durationSeconds + duration
-                    if title and title ~= "" and not entry.seen[title] then
-                        entry.seen[title] = true
-                        table.insert(entry.bookTitles, title)
+                    if title and title ~= "" then
+                        table.insert(entry.books, { title = title, durationSeconds = duration, pagesRead = pages })
                     end
                 end
             end
@@ -101,9 +107,7 @@ function StatsHistory.dailyTotals()
 
     local days = {}
     for _, day in ipairs(order) do
-        local entry = by_day[day]
-        entry.seen = nil
-        table.insert(days, entry)
+        table.insert(days, by_day[day])
     end
     return days
 end

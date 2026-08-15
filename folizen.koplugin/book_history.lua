@@ -27,12 +27,17 @@ local Highlights = require("highlights")
 local BookHistory = {}
 
 -- Normalizes whatever rating scale this KOReader version used (plain 0-5,
--- or 0-10 half-star) down to our 1-5 integer scale. Returns nil for "no
--- rating set" rather than 0, since 0 isn't a valid Folizen rating.
+-- or 0-10 half-star) down to our 1-5 half-star scale (1, 1.5, ..., 5).
+-- Returns nil for "no rating set" rather than 0, since 0 isn't a valid
+-- Folizen rating. Current KOReader master's Book Status dialog only offers
+-- whole-star taps (verified against frontend/ui/widget/bookstatuswidget.lua),
+-- but this still rounds to the nearest half rather than the nearest whole
+-- star so any 0-10 raw value from other versions/forks isn't needlessly
+-- collapsed to a whole star.
 local function normalize_rating(raw)
     if type(raw) ~= "number" or raw <= 0 then return nil end
     local r = raw > 5 and (raw / 2) or raw
-    r = math.floor(r + 0.5)
+    r = math.floor(r * 2 + 0.5) / 2
     if r < 1 then return nil end
     if r > 5 then r = 5 end
     return r

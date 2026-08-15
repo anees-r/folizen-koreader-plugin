@@ -3,6 +3,7 @@ local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local socketutil = require("socketutil")
 local Menu = require("ui/widget/menu")
+local CenterContainer = require("ui/widget/container/centercontainer")
 local PathChooser = require("ui/widget/pathchooser")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
@@ -119,13 +120,13 @@ function Downloads.show()
             return
         end
 
-        local menu
+        local menu, popup
         local items = {}
         for _idx, item in ipairs(queue) do
             table.insert(items, {
                 text = item.title .. " — " .. item.author,
                 callback = function()
-                    UIManager:close(menu)
+                    UIManager:close(popup)
                     if not item.externalLink or item.externalLink == "" then
                         UIManager:show(InfoMessage:new{ text = _("No download link set for this book yet — add one on the web app.") })
                         return
@@ -172,16 +173,24 @@ function Downloads.show()
             })
         end
 
+        -- Menu always anchors itself to (0, 0) regardless of width/height —
+        -- it has no self-centering logic at all. Wrapping it in a
+        -- CenterContainer sized to the full screen is the idiom KOReader's
+        -- own code uses to center a popup Menu; close_callback re-routes
+        -- the menu's own close button (and Api's on-select close below) to
+        -- close that outer wrapper instead of leaving it stuck on screen.
         menu = Menu:new{
             title = _("Queued from Folizen"),
             item_table = items,
             width = Device.screen:getWidth() * 0.8,
-            -- Menu only centers itself on screen when both dimensions are
-            -- explicit — width alone (as elsewhere in this file) leaves it
-            -- anchored to the top-left corner instead.
             height = Device.screen:getHeight() * 0.8,
+            close_callback = function() UIManager:close(popup) end,
         }
-        UIManager:show(menu)
+        popup = CenterContainer:new{
+            dimen = Device.screen:getSize(),
+            menu,
+        }
+        UIManager:show(popup)
     end, { manual = true })
 end
 

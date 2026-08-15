@@ -176,6 +176,10 @@ function Downloads.show()
             title = _("Queued from Folizen"),
             item_table = items,
             width = Device.screen:getWidth() * 0.8,
+            -- Menu only centers itself on screen when both dimensions are
+            -- explicit — width alone (as elsewhere in this file) leaves it
+            -- anchored to the top-left corner instead.
+            height = Device.screen:getHeight() * 0.8,
         }
         UIManager:show(menu)
     end, { manual = true })
